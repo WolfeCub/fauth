@@ -1,0 +1,27 @@
+[package]
+name = "fauth"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+axum = "0.6"
+tokio = { version = "1.23", features = ["full"] }
+jsonwebtoken = "8"
+axum-auth = "0.4"
+
+log = "0.4"
+simplelog = "0.12"
+
+serde = { version = "1.0", features = ["derive"] }
+data-encoding = "2.3"
+
+sqlx = { version = "0.6", features = ["runtime-tokio-rustls", "sqlite"] }
+
+rand = { version = "0.8", features = ["small_rng"] }
+rand_core = { version = "0.6", features = ["std"] }
+argon2 = "0.4"
+totp-lite = "2.0"
+
+ts-rs = { version = "6.1", features = ["serde-compat"] }
