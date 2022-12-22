@@ -1,0 +1,38 @@
+version: "3.3"
+services:
+  traefik:
+    image: "traefik:v2.9"
+    container_name: "traefik"
+    command:
+      - "--log.level=DEBUG"
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--providers.file.filename=/dynamic.yaml"
+    ports:
+      - "80:80"
+      - "8080:8080"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+
+  fauth:
+    build:
+      dockerfile: ./Dockerfile
+    labels:
+      - "traefik.http.middlewares.test-auth.forwardAuth.address=http://fauth:8000/api/verify"
+      - "traefik.enable=true"
+      - "traefik.http.routers.fauth.rule=Host(`fauth.foo.blah`)"
+      - "traefik.http.routers.fauth.entrypoints=web"
+      - "traefik.http.services.fauth-service.loadbalancer.server.port=8000"
+    volumes:
+      - ./api/db.sqlite:/app/api/db.sqlite
+
+  whoami:
+    image: "traefik/whoami"
+    container_name: "simple-service"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.whoami.rule=Host(`whoami.foo.blah`)"
+      - "traefik.http.routers.whoami.entrypoints=web"
+      - "traefik.http.routers.whoami.middlewares=test-auth@docker"

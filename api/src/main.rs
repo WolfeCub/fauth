@@ -1,15 +1,15 @@
 mod types;
 
-use std::time::{SystemTime, Duration};
+use std::time::SystemTime;
 
-use axum_auth::AuthBearer;
+use axum_extra::routing::SpaRouter;
 use data_encoding::BASE32;
 use serde::{Serialize, Deserialize};
-use types::{CreateTotpResponse, CreateUserRequest, CreateTotpRequest, LoginResponse};
+use types::{CreateTotpResponse, CreateUserRequest, CreateTotpRequest};
 
 use axum::{
     routing::{get, post},
-    Router, response::IntoResponse, http::StatusCode, Json, Extension,
+    Router, response::{IntoResponse, Redirect, Response}, http::{StatusCode, HeaderMap}, Json, Extension, extract,
 };
 use log::LevelFilter;
 use rand::Rng;
@@ -22,12 +22,14 @@ use argon2::{
     },
     Argon2, PasswordHash, PasswordVerifier
 };
+use tower_cookies::{CookieManagerLayer, Cookies, Cookie};
 
+const COOKIE_KEY: &'static str = "fauth_token";
 const JWT_SECRET: &'static [u8] = b"A5btxFk53jV7nHnSoEW+iSZg8o4Ypmmj1hjnbZhb1IAbPLG8dAbW3Bvwp3k736cc";
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
-    sub: u32,
+    sub: String,
     exp: usize,
 }
 
@@ -97,10 +99,12 @@ async fn user_register(
     Ok(StatusCode::NO_CONTENT)
 }
 
+
 async fn user_login(
+    cookies: Cookies,
     Extension(db): Extension<Pool<Sqlite>>,
     Json(body): Json<CreateUserRequest>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<StatusCode, StatusCode> {
     let user = get_user(&db, &body.username).await.map_err(|_| StatusCode::NOT_FOUND)?;
 
     let parsed_hash = PasswordHash::new(&user.password).unwrap();
@@ -111,7 +115,7 @@ async fn user_login(
 
     let expiration = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
     let claim = Claims {
-        sub: 1,
+        sub: body.username,
         exp: expiration as usize + 86400,
     };
 
@@ -121,21 +125,41 @@ async fn user_login(
         &jsonwebtoken::EncodingKey::from_secret(JWT_SECRET)
     ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(LoginResponse {
-        jwt: token,
-    }))
+    cookies.add(Cookie::build(COOKIE_KEY, token)
+        .domain("foo.blah")
+        .path("/")
+        .finish());
+
+    Ok(StatusCode::OK)
+}
+
+#[derive(Debug, Deserialize)]
+struct ValidateQueryParams {
+    disable_redirect: Option<bool>,
 }
 
 async fn validate_token(
-    AuthBearer(token): AuthBearer,
-) -> Result<(), StatusCode> {
-    let jwt = jsonwebtoken::decode::<Claims>(
-        &token, 
-        &jsonwebtoken::DecodingKey::from_secret(JWT_SECRET), 
-        &jsonwebtoken::Validation::default()
-    ).map_err(|_| StatusCode::UNAUTHORIZED)?;
+    headers: HeaderMap,
+    cookies: Cookies,
+    query: extract::Query<ValidateQueryParams>,
+) -> Response {
+    let jwt = cookies.get(COOKIE_KEY).and_then(|token| {
+        jsonwebtoken::decode::<Claims>(
+            &token.value(), 
+            &jsonwebtoken::DecodingKey::from_secret(JWT_SECRET), 
+            &jsonwebtoken::Validation::default())
+            .ok()
+    });
 
-    Ok(())
+    if let Some(_token_data) = jwt {
+        ().into_response()
+    } else if let Some(true) = query.disable_redirect {
+        StatusCode::UNAUTHORIZED.into_response()
+    } else {
+        let (host, port) = headers.get("x-forwarded-host").zip(headers.get("x-forwarded-port")).expect("Missing headers");
+        let url = format!("http://fauth.foo.blah?redirect={}://{}", if port.to_str().unwrap() == "443" { "https" } else { "http" }, host.to_str().unwrap());
+        Redirect::temporary(&url).into_response()
+    }
 }
 
 #[tokio::main]
@@ -154,14 +178,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     log::info!("Migrations complete.");
 
-    // build our application with a single route
+    let spa = SpaRouter::new("/", "../ui/dist");
     let app = Router::new()
-        .route("/", get(|| async { "Hello, World!" }))
+        .merge(spa)
         .route("/api/user/register", post(user_register))
         .route("/api/user/totp", post(register_user_totp))
         .route("/api/user/login", post(user_login))
-        .route("/api/validate_token", get(validate_token))
-        .layer(Extension(db));
+        .route("/api/verify", get(validate_token))
+        .layer(Extension(db))
+        .layer(CookieManagerLayer::new());
 
     let addr = "0.0.0.0:8000";
     log::info!("Starting web server on: {}", addr);
