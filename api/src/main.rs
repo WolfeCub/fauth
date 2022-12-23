@@ -1,31 +1,30 @@
 mod types;
 
-use std::time::SystemTime;
+use std::{env, fs, time::SystemTime};
 
 use axum_extra::routing::SpaRouter;
 use data_encoding::BASE32;
-use serde::{Serialize, Deserialize};
-use types::{CreateTotpResponse, CreateUserRequest, CreateTotpRequest};
+use serde::{Deserialize, Serialize};
+use types::{CreateTotpRequest, CreateTotpResponse, CreateUserRequest};
 
+use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
+    Argon2, PasswordHash, PasswordVerifier,
+};
 use axum::{
+    extract,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Redirect, Response},
     routing::{get, post},
-    Router, response::{IntoResponse, Redirect, Response}, http::{StatusCode, HeaderMap}, Json, Extension, extract,
+    Extension, Json, Router,
 };
 use log::LevelFilter;
 use rand::Rng;
-use simplelog::{CombinedLogger, TermLogger, Config, TerminalMode, ColorChoice};
+use simplelog::{ColorChoice, CombinedLogger, Config, TermLogger, TerminalMode};
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
-use argon2::{
-    password_hash::{
-        rand_core::OsRng,
-        PasswordHasher, SaltString
-    },
-    Argon2, PasswordHash, PasswordVerifier
-};
-use tower_cookies::{CookieManagerLayer, Cookies, Cookie};
+use tower_cookies::{Cookie, CookieManagerLayer, Cookies};
 
 const COOKIE_KEY: &'static str = "fauth_token";
-const JWT_SECRET: &'static [u8] = b"A5btxFk53jV7nHnSoEW+iSZg8o4Ypmmj1hjnbZhb1IAbPLG8dAbW3Bvwp3k736cc";
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
@@ -39,10 +38,7 @@ struct User {
     totp_secret: String,
 }
 
-async fn get_user(
-    db: &Pool<Sqlite>,
-    username: &str
-) -> Result<User, sqlx::Error> {
+async fn get_user(db: &Pool<Sqlite>, username: &str) -> Result<User, sqlx::Error> {
     sqlx::query_as("SELECT password, totp_secret FROM USERS WHERE username = ?")
         .bind(username)
         .fetch_one(db)
@@ -53,7 +49,9 @@ async fn register_user_totp(
     Extension(db): Extension<Pool<Sqlite>>,
     Json(body): Json<CreateTotpRequest>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    get_user(&db, &body.username).await.map_err(|_| StatusCode::NOT_FOUND)?;
+    get_user(&db, &body.username)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
 
     let secret = rand::thread_rng().gen::<[u8; 32]>();
     let encoded_secret = BASE32.encode(&secret);
@@ -83,7 +81,10 @@ async fn user_register(
 ) -> Result<StatusCode, StatusCode> {
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
-    let password_hash = argon2.hash_password(body.password.as_bytes(), &salt).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?.to_string();
+    let password_hash = argon2
+        .hash_password(body.password.as_bytes(), &salt)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .to_string();
 
     let result = sqlx::query("INSERT INTO USERS (username, password) VALUES (?, ?)")
         .bind(body.username)
@@ -99,36 +100,47 @@ async fn user_register(
     Ok(StatusCode::NO_CONTENT)
 }
 
-
 async fn user_login(
     cookies: Cookies,
+    Extension(app_settings): Extension<AppSettings>,
     Extension(db): Extension<Pool<Sqlite>>,
     Json(body): Json<CreateUserRequest>,
 ) -> Result<StatusCode, StatusCode> {
-    let user = get_user(&db, &body.username).await.map_err(|_| StatusCode::NOT_FOUND)?;
+    let user = get_user(&db, &body.username)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
 
     let parsed_hash = PasswordHash::new(&user.password).unwrap();
 
-    if Argon2::default().verify_password(body.password.as_bytes(), &parsed_hash).is_err() {
+    if Argon2::default()
+        .verify_password(body.password.as_bytes(), &parsed_hash)
+        .is_err()
+    {
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    let expiration = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
+    let expiration = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     let claim = Claims {
         sub: body.username,
         exp: expiration as usize + 86400,
     };
 
     let token = jsonwebtoken::encode(
-        &jsonwebtoken::Header::default(), 
-        &claim, 
-        &jsonwebtoken::EncodingKey::from_secret(JWT_SECRET)
-    ).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        &jsonwebtoken::Header::default(),
+        &claim,
+        &jsonwebtoken::EncodingKey::from_secret(app_settings.jwt_secret.as_bytes()),
+    )
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    cookies.add(Cookie::build(COOKIE_KEY, token)
-        .domain("foo.blah")
-        .path("/")
-        .finish());
+    cookies.add(
+        Cookie::build(COOKIE_KEY, token)
+            .domain(app_settings.cookie_domain)
+            .path("/")
+            .finish(),
+    );
 
     Ok(StatusCode::OK)
 }
@@ -142,13 +154,15 @@ async fn validate_token(
     headers: HeaderMap,
     cookies: Cookies,
     query: extract::Query<ValidateQueryParams>,
+    Extension(app_settings): Extension<AppSettings>,
 ) -> Response {
     let jwt = cookies.get(COOKIE_KEY).and_then(|token| {
         jsonwebtoken::decode::<Claims>(
-            &token.value(), 
-            &jsonwebtoken::DecodingKey::from_secret(JWT_SECRET), 
-            &jsonwebtoken::Validation::default())
-            .ok()
+            &token.value(),
+            &jsonwebtoken::DecodingKey::from_secret(app_settings.jwt_secret.as_bytes()),
+            &jsonwebtoken::Validation::default(),
+        )
+        .ok()
     });
 
     if let Some(_token_data) = jwt {
@@ -156,26 +170,53 @@ async fn validate_token(
     } else if let Some(true) = query.disable_redirect {
         StatusCode::UNAUTHORIZED.into_response()
     } else {
-        let (host, port) = headers.get("x-forwarded-host").zip(headers.get("x-forwarded-port")).expect("Missing headers");
-        let url = format!("http://fauth.foo.blah?redirect={}://{}", if port.to_str().unwrap() == "443" { "https" } else { "http" }, host.to_str().unwrap());
+        let (host, port) = headers
+            .get("x-forwarded-host")
+            .zip(headers.get("x-forwarded-port"))
+            .expect("Missing headers");
+        let url = format!(
+            "{}?redirect={}://{}",
+            app_settings.domain,
+            if port.to_str().unwrap() == "443" {
+                "https"
+            } else {
+                "http"
+            },
+            host.to_str().unwrap()
+        );
         Redirect::temporary(&url).into_response()
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AppSettings {
+    level_filter: LevelFilter,
+    cookie_domain: String,
+    jwt_secret: String,
+    domain: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    CombinedLogger::init(vec![
-        TermLogger::new(LevelFilter::Info, Config::default(), TerminalMode::Mixed, ColorChoice::Auto),
-    ])?;
+    let app_settings = serde_yaml::from_str::<AppSettings>(
+        &fs::read_to_string(env::var("FAUTH_CONFIG").unwrap_or("/etc/fauth.yaml".to_owned()))
+            .expect("Unable to open config file"),
+    )
+    .expect("Error parsing config file");
+
+    CombinedLogger::init(vec![TermLogger::new(
+        app_settings.level_filter,
+        Config::default(),
+        TerminalMode::Mixed,
+        ColorChoice::Auto,
+    )])?;
 
     let db = SqlitePoolOptions::new()
         .connect("sqlite:db.sqlite?mode=rwc")
         .await?;
 
     log::info!("Running migrations...");
-    sqlx::migrate!()
-        .run(&db)
-        .await?;
+    sqlx::migrate!().run(&db).await?;
     log::info!("Migrations complete.");
 
     let spa = SpaRouter::new("/", "../ui/dist");
@@ -186,6 +227,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/user/login", post(user_login))
         .route("/api/verify", get(validate_token))
         .layer(Extension(db))
+        .layer(Extension(app_settings))
         .layer(CookieManagerLayer::new());
 
     let addr = "0.0.0.0:8000";
@@ -195,5 +237,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .unwrap();
 
-    return Ok(())
+    return Ok(());
 }

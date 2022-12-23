@@ -22,17 +22,18 @@ services:
     labels:
       - "traefik.http.middlewares.test-auth.forwardAuth.address=http://fauth:8000/api/verify"
       - "traefik.enable=true"
-      - "traefik.http.routers.fauth.rule=Host(`fauth.foo.blah`)"
+      - "traefik.http.routers.fauth.rule=Host(`fauth.some.domain`)"
       - "traefik.http.routers.fauth.entrypoints=web"
       - "traefik.http.services.fauth-service.loadbalancer.server.port=8000"
     volumes:
       - ./api/db.sqlite:/app/api/db.sqlite
+      - ./example_config.yaml:/etc/fauth.yaml
 
   whoami:
     image: "traefik/whoami"
     container_name: "simple-service"
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.whoami.rule=Host(`whoami.foo.blah`)"
+      - "traefik.http.routers.whoami.rule=Host(`whoami.some.domain`)"
       - "traefik.http.routers.whoami.entrypoints=web"
       - "traefik.http.routers.whoami.middlewares=test-auth@docker"
