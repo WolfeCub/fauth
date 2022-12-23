@@ -9,16 +9,17 @@ services:
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
       - "--entrypoints.web.address=:80"
-      - "--providers.file.filename=/dynamic.yaml"
     ports:
-      - "80:80"
-      - "8080:8080"
+      - 80:80
+      - 8080:8080
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock:ro"
 
   fauth:
     build:
       dockerfile: ./Dockerfile
+    ports:
+      - 8888:8888
     labels:
       - "traefik.http.middlewares.test-auth.forwardAuth.address=http://fauth:8000/api/verify"
       - "traefik.enable=true"

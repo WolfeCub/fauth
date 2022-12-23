@@ -1,4 +1,4 @@
-level_filter: warn
+level_filter: info
 cookie_domain: some.domain
 domain: http://fauth.some.domain
 jwt_secret: A5btxFk53jV7nHnSoEW+iSZg8o4Ypmmj1hjnbZhb1IAbPLG8dAbW3Bvwp3k736cc # DO NOT USE THIS

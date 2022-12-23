@@ -1,11 +1,12 @@
 mod types;
+mod requests;
 
 use std::{env, fs, time::SystemTime};
 
 use axum_extra::routing::SpaRouter;
 use data_encoding::BASE32;
-use serde::{Deserialize, Serialize};
-use types::{CreateTotpRequest, CreateTotpResponse, CreateUserRequest};
+use requests::{CreateTotpRequest, CreateTotpResponse, CreateUserRequest};
+use types::{AppSettings, User, Claims, ValidateQueryParams};
 
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
@@ -18,25 +19,12 @@ use axum::{
     routing::{get, post},
     Extension, Json, Router,
 };
-use log::LevelFilter;
 use rand::Rng;
 use simplelog::{ColorChoice, CombinedLogger, Config, TermLogger, TerminalMode};
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
 use tower_cookies::{Cookie, CookieManagerLayer, Cookies};
 
 const COOKIE_KEY: &'static str = "fauth_token";
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Claims {
-    sub: String,
-    exp: usize,
-}
-
-#[derive(sqlx::FromRow)]
-struct User {
-    password: String,
-    totp_secret: String,
-}
 
 async fn get_user(db: &Pool<Sqlite>, username: &str) -> Result<User, sqlx::Error> {
     sqlx::query_as("SELECT password, totp_secret FROM USERS WHERE username = ?")
@@ -145,11 +133,6 @@ async fn user_login(
     Ok(StatusCode::OK)
 }
 
-#[derive(Debug, Deserialize)]
-struct ValidateQueryParams {
-    disable_redirect: Option<bool>,
-}
-
 async fn validate_token(
     headers: HeaderMap,
     cookies: Cookies,
@@ -188,12 +171,40 @@ async fn validate_token(
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct AppSettings {
-    level_filter: LevelFilter,
-    cookie_domain: String,
-    jwt_secret: String,
-    domain: String,
+async fn app_server(app_settings: AppSettings, db: Pool<Sqlite>) -> Result<(), Box<dyn std::error::Error>> {
+    let addr = format!("0.0.0.0:{}", &app_settings.port.unwrap_or(8000));
+    let app = Router::new()
+        .merge(SpaRouter::new("/", "../ui/dist"))
+        .route("/api/user/register", post(user_register))
+        .route("/api/user/totp", post(register_user_totp))
+        .route("/api/user/login", post(user_login))
+        .route("/api/verify", get(validate_token))
+        .layer(Extension(db))
+        .layer(Extension(app_settings))
+        .layer(CookieManagerLayer::new());
+
+    log::info!("Starting web server on: {}", addr);
+    axum::Server::bind(&addr.parse()?)
+        .serve(app.into_make_service())
+        .await?;
+
+    Ok(())
+}
+
+async fn admin_server(app_settings: AppSettings, db: Pool<Sqlite>) -> Result<(), Box<dyn std::error::Error>> {
+    let addr = format!("0.0.0.0:{}", &app_settings.admin_port.unwrap_or(8888));
+    let app = Router::new()
+        .route("/", get(|| async { "hello" }))
+        .layer(Extension(db))
+        .layer(Extension(app_settings))
+        .layer(CookieManagerLayer::new());
+
+    log::info!("Starting web server on: {}", addr);
+    axum::Server::bind(&addr.parse()?)
+        .serve(app.into_make_service())
+        .await?;
+
+    Ok(())
 }
 
 #[tokio::main]
@@ -219,23 +230,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     sqlx::migrate!().run(&db).await?;
     log::info!("Migrations complete.");
 
-    let spa = SpaRouter::new("/", "../ui/dist");
-    let app = Router::new()
-        .merge(spa)
-        .route("/api/user/register", post(user_register))
-        .route("/api/user/totp", post(register_user_totp))
-        .route("/api/user/login", post(user_login))
-        .route("/api/verify", get(validate_token))
-        .layer(Extension(db))
-        .layer(Extension(app_settings))
-        .layer(CookieManagerLayer::new());
+    let app = app_server(app_settings.clone(), db.clone());
+    let admin = admin_server(app_settings, db);
 
-    let addr = "0.0.0.0:8000";
-    log::info!("Starting web server on: {}", addr);
-    axum::Server::bind(&addr.parse().unwrap())
-        .serve(app.into_make_service())
-        .await
-        .unwrap();
+    tokio::try_join!(app, admin).unwrap();
 
-    return Ok(());
+    Ok(())
 }
