@@ -1,12 +1,12 @@
-mod types;
 mod requests;
+mod types;
 
-use std::{env, fs, time::SystemTime};
+use std::{env, fs, io, time::SystemTime};
 
-use axum_extra::routing::SpaRouter;
 use data_encoding::BASE32;
 use requests::{CreateTotpRequest, CreateTotpResponse, CreateUserRequest};
-use types::{AppSettings, User, Claims, ValidateQueryParams};
+use tower_http::services::{ServeDir, ServeFile};
+use types::{AppSettings, Claims, User, ValidateQueryParams};
 
 use argon2::{
     password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
@@ -16,7 +16,7 @@ use axum::{
     extract,
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Redirect, Response},
-    routing::{get, post},
+    routing::{get, get_service, post},
     Extension, Json, Router,
 };
 use rand::Rng;
@@ -171,17 +171,32 @@ async fn validate_token(
     }
 }
 
-async fn app_server(app_settings: AppSettings, db: Pool<Sqlite>) -> Result<(), Box<dyn std::error::Error>> {
+async fn app_server(
+    app_settings: AppSettings,
+    db: Pool<Sqlite>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("0.0.0.0:{}", &app_settings.port.unwrap_or(8000));
+
+    async fn handle_error(e: io::Error) -> impl IntoResponse {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Unexpected error: {}", e),
+        )
+    }
+    let spa = get_service(
+        ServeDir::new("../ui/dist").not_found_service(ServeFile::new("../ui/dist/index.html")),
+    )
+    .handle_error(handle_error);
+
     let app = Router::new()
-        .merge(SpaRouter::new("/", "../ui/dist"))
         .route("/api/user/register", post(user_register))
         .route("/api/user/totp", post(register_user_totp))
         .route("/api/user/login", post(user_login))
         .route("/api/verify", get(validate_token))
         .layer(Extension(db))
         .layer(Extension(app_settings))
-        .layer(CookieManagerLayer::new());
+        .layer(CookieManagerLayer::new())
+        .fallback_service(spa);
 
     log::info!("Starting web server on: {}", addr);
     axum::Server::bind(&addr.parse()?)
@@ -191,7 +206,10 @@ async fn app_server(app_settings: AppSettings, db: Pool<Sqlite>) -> Result<(), B
     Ok(())
 }
 
-async fn admin_server(app_settings: AppSettings, db: Pool<Sqlite>) -> Result<(), Box<dyn std::error::Error>> {
+async fn admin_server(
+    app_settings: AppSettings,
+    db: Pool<Sqlite>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("0.0.0.0:{}", &app_settings.admin_port.unwrap_or(8888));
     let app = Router::new()
         .route("/", get(|| async { "hello" }))
