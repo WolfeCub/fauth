@@ -296,6 +296,7 @@ dependencies = [
  "rand",
  "rand_core",
  "serde",
+ "serde_urlencoded",
  "serde_yaml",
  "simplelog",
  "sqlx",

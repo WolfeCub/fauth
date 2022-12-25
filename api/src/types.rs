@@ -3,14 +3,16 @@ use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
-    pub sub: String,
     pub exp: usize,
+    pub sub: String,
+    pub admin: bool,
 }
 
 #[derive(sqlx::FromRow)]
 pub struct User {
     pub password: String,
     pub totp_secret: String,
+    pub admin: bool,
 }
 
 

@@ -1,21 +1,21 @@
 mod requests;
 mod types;
+mod admin;
+mod jwt_extractor;
 
 use std::{env, fs, io, time::SystemTime};
 
 use data_encoding::BASE32;
 use requests::{CreateTotpRequest, CreateTotpResponse, CreateUserRequest};
 use tower_http::services::{ServeDir, ServeFile};
-use types::{AppSettings, Claims, User, ValidateQueryParams};
+use types::{AppSettings, Claims, User};
 
 use argon2::{
-    password_hash::{rand_core::OsRng, PasswordHasher, SaltString},
     Argon2, PasswordHash, PasswordVerifier,
 };
 use axum::{
-    extract,
-    http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Redirect, Response},
+    http::StatusCode,
+    response::{IntoResponse, Response},
     routing::{get, get_service, post},
     Extension, Json, Router,
 };
@@ -23,11 +23,14 @@ use rand::Rng;
 use simplelog::{ColorChoice, CombinedLogger, Config, TermLogger, TerminalMode};
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
 use tower_cookies::{Cookie, CookieManagerLayer, Cookies};
+use jwt_extractor::ExtractJwt;
+
+use crate::admin::admin_server;
 
 const COOKIE_KEY: &'static str = "fauth_token";
 
 async fn get_user(db: &Pool<Sqlite>, username: &str) -> Result<User, sqlx::Error> {
-    sqlx::query_as("SELECT password, totp_secret FROM USERS WHERE username = ?")
+    sqlx::query_as("SELECT password, totp_secret, admin FROM USERS WHERE username = ?")
         .bind(username)
         .fetch_one(db)
         .await
@@ -63,31 +66,6 @@ async fn register_user_totp(
     }))
 }
 
-async fn user_register(
-    Extension(db): Extension<Pool<Sqlite>>,
-    Json(body): Json<CreateUserRequest>,
-) -> Result<StatusCode, StatusCode> {
-    let salt = SaltString::generate(&mut OsRng);
-    let argon2 = Argon2::default();
-    let password_hash = argon2
-        .hash_password(body.password.as_bytes(), &salt)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .to_string();
-
-    let result = sqlx::query("INSERT INTO USERS (username, password) VALUES (?, ?)")
-        .bind(body.username)
-        .bind(password_hash)
-        .execute(&db)
-        .await;
-
-    if let Err(e) = result {
-        log::error!("{}", e);
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-    }
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
 async fn user_login(
     cookies: Cookies,
     Extension(app_settings): Extension<AppSettings>,
@@ -112,8 +90,9 @@ async fn user_login(
         .unwrap()
         .as_secs();
     let claim = Claims {
-        sub: body.username,
         exp: expiration as usize + 86400,
+        sub: body.username,
+        admin: user.admin,
     };
 
     let token = jsonwebtoken::encode(
@@ -134,41 +113,9 @@ async fn user_login(
 }
 
 async fn validate_token(
-    headers: HeaderMap,
-    cookies: Cookies,
-    query: extract::Query<ValidateQueryParams>,
-    Extension(app_settings): Extension<AppSettings>,
+    ExtractJwt(_): ExtractJwt,
 ) -> Response {
-    let jwt = cookies.get(COOKIE_KEY).and_then(|token| {
-        jsonwebtoken::decode::<Claims>(
-            &token.value(),
-            &jsonwebtoken::DecodingKey::from_secret(app_settings.jwt_secret.as_bytes()),
-            &jsonwebtoken::Validation::default(),
-        )
-        .ok()
-    });
-
-    if let Some(_token_data) = jwt {
-        ().into_response()
-    } else if let Some(true) = query.disable_redirect {
-        StatusCode::UNAUTHORIZED.into_response()
-    } else {
-        let (host, port) = headers
-            .get("x-forwarded-host")
-            .zip(headers.get("x-forwarded-port"))
-            .expect("Missing headers");
-        let url = format!(
-            "{}?redirect={}://{}",
-            app_settings.domain,
-            if port.to_str().unwrap() == "443" {
-                "https"
-            } else {
-                "http"
-            },
-            host.to_str().unwrap()
-        );
-        Redirect::temporary(&url).into_response()
-    }
+    ().into_response()
 }
 
 async fn app_server(
@@ -189,7 +136,6 @@ async fn app_server(
     .handle_error(handle_error);
 
     let app = Router::new()
-        .route("/api/user/register", post(user_register))
         .route("/api/user/totp", post(register_user_totp))
         .route("/api/user/login", post(user_login))
         .route("/api/verify", get(validate_token))
@@ -197,25 +143,6 @@ async fn app_server(
         .layer(Extension(app_settings))
         .layer(CookieManagerLayer::new())
         .fallback_service(spa);
-
-    log::info!("Starting web server on: {}", addr);
-    axum::Server::bind(&addr.parse()?)
-        .serve(app.into_make_service())
-        .await?;
-
-    Ok(())
-}
-
-async fn admin_server(
-    app_settings: AppSettings,
-    db: Pool<Sqlite>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let addr = format!("0.0.0.0:{}", &app_settings.admin_port.unwrap_or(8888));
-    let app = Router::new()
-        .route("/", get(|| async { "hello" }))
-        .layer(Extension(db))
-        .layer(Extension(app_settings))
-        .layer(CookieManagerLayer::new());
 
     log::info!("Starting web server on: {}", addr);
     axum::Server::bind(&addr.parse()?)

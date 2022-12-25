@@ -1,34 +1,35 @@
 import { Component, createSignal } from "solid-js";
+import { createStore } from "solid-js/store";
 import axios from 'axios';
 import { FloatingBox } from "./FloatingBox";
 
-export const Login: Component = () => {
-    const [username, setUsername] = createSignal('');
-    const [password, setPassword] = createSignal('');
+interface Props {
+    refetch: () => Promise<void>
+}
+
+export const Login: Component<Props> = (props) => {
+    const [state, setState] = createStore({
+        username: '',
+        password: '',
+    });
 
     const login = async () => {
-        await axios.post(
-            "/api/user/login",
-            {
-                username: username(),
-                password: password(),
-            },
-            {
-                withCredentials: true,
-            }
-        );
+        await axios.post("/api/user/login", state, {
+            withCredentials: true,
+        });
 
-        const urlSearchParams = new URLSearchParams(window.location.search);
-        const params = Object.fromEntries(urlSearchParams.entries());
-        const redirectUrl = params["redirect"];
-
-        if (redirectUrl) document.location.href = redirectUrl;
+        await props.refetch();
     };
+
+    const onSubmit = async (e: SubmitEvent) => {
+        e.preventDefault();
+        await login();
+    }
 
     const inputStyles = "shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline";
 
     return (
-        <FloatingBox>
+        <form onSubmit={onSubmit}>
             <div class="mb-4">
                 <label
                     class="block text-gray-700 text-sm font-bold mb-2"
@@ -38,8 +39,8 @@ export const Login: Component = () => {
                 </label>
                 <input
                     class={inputStyles}
-                    value={username()}
-                    onInput={(e) => setUsername(e.currentTarget.value)}
+                    value={state.username}
+                    onInput={(e) => setState({ username: e.currentTarget.value })}
                     id="username"
                     type="text"
                     placeholder="Username"
@@ -54,8 +55,8 @@ export const Login: Component = () => {
                 </label>
                 <input
                     class={inputStyles}
-                    value={password()}
-                    onInput={(e) => setPassword(e.currentTarget.value)}
+                    value={state.password}
+                    onInput={(e) => setState({ password: e.currentTarget.value })}
                     id="password"
                     type="password"
                     placeholder="Password"
@@ -63,8 +64,8 @@ export const Login: Component = () => {
             </div>
             <button
                 class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded"
-                onClick={login}>Login</button
-            >
-        </FloatingBox>
+                type="submit"
+            >Login</button>
+        </form>
     );
 }

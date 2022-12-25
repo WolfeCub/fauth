@@ -15,3 +15,14 @@ pub struct CreateTotpRequest {
 pub struct CreateTotpResponse {
     pub secret: String,
 }
+
+#[derive(Serialize, Deserialize)]
+pub struct ListUsersUserModel {
+    pub username: String,
+    pub admin: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ListUsersResponse {
+    pub users: Vec<String>,
+}
