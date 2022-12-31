@@ -30,7 +30,7 @@ use crate::admin::admin_server;
 const COOKIE_KEY: &'static str = "fauth_token";
 
 async fn get_user(db: &Pool<Sqlite>, username: &str) -> Result<User, sqlx::Error> {
-    sqlx::query_as("SELECT password, totp_secret, admin FROM USERS WHERE username = ?")
+    sqlx::query_as("SELECT password, admin FROM USERS WHERE username = ?")
         .bind(username)
         .fetch_one(db)
         .await
@@ -47,9 +47,9 @@ async fn register_user_totp(
     let secret = rand::thread_rng().gen::<[u8; 32]>();
     let encoded_secret = BASE32.encode(&secret);
 
-    let result = sqlx::query("UPDATE USERS SET totp_secret = ? WHERE username = ?")
-        .bind(&encoded_secret)
+    let result = sqlx::query("INSERT INTO USERS (username, totp_secret) VALUES (?, ?)")
         .bind(&body.username)
+        .bind(&encoded_secret)
         .execute(&db)
         .await;
 
@@ -71,7 +71,7 @@ async fn user_login(
     Extension(app_settings): Extension<AppSettings>,
     Extension(db): Extension<Pool<Sqlite>>,
     Json(body): Json<CreateUserRequest>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<impl IntoResponse, StatusCode> {
     let user = get_user(&db, &body.username)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
@@ -89,6 +89,7 @@ async fn user_login(
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_secs();
+
     let claim = Claims {
         exp: expiration as usize + 86400,
         sub: body.username,

@@ -11,7 +11,6 @@ pub struct Claims {
 #[derive(sqlx::FromRow)]
 pub struct User {
     pub password: String,
-    pub totp_secret: String,
     pub admin: bool,
 }
 
